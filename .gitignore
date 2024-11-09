@@ -6,6 +6,7 @@ pre.yaml
 pre.json
 deno.lock
 templates/
+output/
 
 # Logs
 logs

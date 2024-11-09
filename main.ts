@@ -1,27 +1,150 @@
 import $ from "@david/dax";
 import { exists, ensureDir } from "https://deno.land/std@0.114.0/fs/mod.ts";
+import { parse as parseYaml } from "https://deno.land/std@0.182.0/yaml/mod.ts";
+import { parse } from "https://deno.land/std@0.182.0/flags/mod.ts";
 
-interface Params {
-  bucket_name: string;
-  project_name: string;
-  aws_region: string;
-  git_repo: string;
+interface Variable {
+  name: string;
+  value?: string;
+  valueFrom?: string;
 }
 
+interface Step {
+  bash: string;
+  displayName?: string;
+}
+
+interface Config {
+  variables: Variable[];
+  steps: Step[];
+}
+
+interface Params {
+  [key: string]: string;
+}
+
+const colors = {
+  red: '\x1b[38;2;255;20;60m',    // errors
+  yellow: '\x1b[33m', // warnings
+  green: '\x1b[32m',  // success
+  blue: '\x1b[38;2;0;157;255m',   // info
+  reset: '\x1b[0m'
+};
+
+function logError(message: string) {
+  console.error(`${colors.red}${message}${colors.reset}`);
+}
+
+//function logWarning(message: string) {
+//  console.warn(`${colors.yellow}${message}${colors.reset}`);
+//}
+
+function logSuccess(message: string) {
+  console.log(`${colors.green}${message}${colors.reset}`);
+}
+
+function logInfo(message: string) {
+  console.log(`${colors.blue}${message}${colors.reset}`);
+}
+
+let hasValueFrom = false;
+
 async function loadParameters(): Promise<Params> {
-  const configPath = "./_pre.json";
-  if (!(await exists(configPath))) {
-    console.error("Error: No se encontró el archivo cookiecutter.json");
+  let configPath: string | undefined;
+  
+  // 1. Check if config is provided as an argument
+  const args = parse(Deno.args);
+  if (args.config) {
+    configPath = args.config;
+    if (await exists(configPath)) {
+      console.log(`Using configuration from argument: ${configPath}`);
+    } else {
+      console.error(`Error: Configuration file specified in arguments not found: ${configPath}`);
+      Deno.exit(1);
+    }
+  }
+  
+  // 2. Check ./_pre.yml if no argument provided
+  if (!configPath && await exists("./_pre.yml")) {
+    configPath = "./_pre.yml";
+    console.log("Using configuration from ./_pre.yml");
+  }
+  
+  // 3. Check ./pre/_pre.yml if previous locations not found
+  if (!configPath && await exists("./pre/_pre.yml")) {
+    configPath = "./pre/_pre.yml";
+    console.log("Using configuration from ./pre/_pre.yml");
+  }
+  
+  // 4. Error if no configuration file found
+  if (!configPath) {
+    console.error("Error: No configuration file found. Please provide one of the following:");
+    console.error("- Use --config argument to specify the configuration file");
+    console.error("- Place _pre.yml in the current directory");
+    console.error("- Place _pre.yml in the ./pre directory");
     Deno.exit(1);
   }
   
-  // Leer y parsear el archivo JSON
   const configText = await Deno.readTextFile(configPath);
-  return JSON.parse(configText) as Params;
+  const config = parseYaml(configText) as Config;
+
+  const params: Params = {};
+  await Promise.all(
+    config.variables?.map(async (variable: Variable) => {
+      if (variable.value !== undefined) {
+        params[variable.name] = variable.value;
+      } else if (variable.valueFrom !== undefined) {  // valueRead
+        const result = await $.raw`${variable.valueFrom}`.text();
+        params[variable.name] = result;
+        hasValueFrom = true;
+      }
+    }) || []
+  );
+
+  return { params, steps: config.steps };
+}
+
+async function executeSteps(steps: Step[], params: Params) {
+  for (const step of steps) {
+    if (step.displayName) {
+      logInfo(`\n:: [ ${step.displayName} ] ::`);
+    }
+
+    // Replace variables in the bash command
+    let command = step.bash;
+    for (const [key, value] of Object.entries(params)) {
+      command = command.replace(new RegExp(`\\$\\{${key}\\}`, 'g'), value);
+    }
+
+    try {
+      console.log(`=> ${command}`);
+      let result;
+      if (!hasValueFrom) {
+        result = await $.raw`${command}`.text();
+      } else {
+        result = await $.raw`gum spin --spinner dot --title "${step.displayName}..." --timeout=0 -- ${command}`.text();
+      }
+      console.log(result);
+      //const result = await $.raw`${command}`.stdout("piped");
+      //console.log(result.stdout);
+    } catch (error) {
+      logError(`Error executing bash: ${command}\n\n`);
+      logError(error.message || error);
+      //Deno.exit(1);
+    }
+  }
+
+  logSuccess(":: [ Prepared sentences completed successfully ] ::")
 }
 
 async function main() {
-  // Cargar parámetros desde el archivo JSON
+  const { params, steps } = await loadParameters();
+  console.log("=> Loaded parameters:", params);
+
+  await executeSteps(steps, params);
+}
+
+async function checkoutTask() {
   const { bucket_name, project_name, aws_region, git_repo } = await loadParameters();
 
   if (!git_repo.endsWith(".git")) {
@@ -32,7 +155,6 @@ async function main() {
   const repoName = git_repo.split("/").pop()?.replace(".git", "") || "cloned_repo";
   const clonePath = `./${repoName}`;
 
-  // Clonar el repositorio
   if (await exists(clonePath)) {
     console.log(`El repositorio ${repoName} ya existe en ${clonePath}. Omitiendo clonación.`);
   } else {
@@ -41,26 +163,22 @@ async function main() {
     console.log("Repositorio clonado con éxito.");
   }
 
-  // Moverse al directorio del repositorio clonado
   $.cd(clonePath);
 
-  // Ruta a la plantilla de CloudFormation
   const templatePath = `./templates/s3_bucket.yaml`;
   const template = await Deno.readTextFile(templatePath);
 
-  // Reemplazar las variables en la plantilla con los parámetros JSON
   const output = template
     .replace("${name}", name)
     .replace("${bucketName}", bucket_name)
     .replace("${projectName}", project_name)
     .replace("${awsRegion}", aws_region);
 
-  // Guardar el archivo generado en el directorio de salida
   const outputPath = `${clonePath}/output/s3_bucket.yaml`;
   await ensureDir(`${clonePath}/output`);
   await Deno.writeTextFile(outputPath, output);
 
-  console.log(`Archivo de CloudFormation generado en: ${outputPath}`);
+  console.log(`CloudFormation generated in: ${outputPath}`);
 }
 
 main();
