@@ -33,6 +33,6 @@ deno run --allow-read --allow-write --allow-env --allow-run main.ts
 
 <!--
 ```bash
-deno compile --allow-read --allow-write --allow-env --allow-run -o onmind-pre main.ts
+deno compile --no-check --allow-read --allow-write --allow-env --allow-run -o onmind-pre main.ts
 ```
 -->

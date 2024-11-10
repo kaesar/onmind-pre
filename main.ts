@@ -23,10 +23,15 @@ interface Params {
   [key: string]: string;
 }
 
+interface ConfigResult {
+  params: Params;
+  steps: Step[];
+}
+
 const colors = {
   red: '\x1b[38;2;255;20;60m',    // errors
-  yellow: '\x1b[33m', // warnings
-  green: '\x1b[32m',  // success
+  yellow: '\x1b[33m',             // warnings
+  green: '\x1b[32m',              // success
   blue: '\x1b[38;2;0;157;255m',   // info
   reset: '\x1b[0m'
 };
@@ -35,9 +40,9 @@ function logError(message: string) {
   console.error(`${colors.red}${message}${colors.reset}`);
 }
 
-//function logWarning(message: string) {
-//  console.warn(`${colors.yellow}${message}${colors.reset}`);
-//}
+function logWarning(message: string) {
+  console.warn(`${colors.yellow}${message}${colors.reset}`);
+}
 
 function logSuccess(message: string) {
   console.log(`${colors.green}${message}${colors.reset}`);
@@ -49,7 +54,7 @@ function logInfo(message: string) {
 
 let hasValueFrom = false;
 
-async function loadParameters(): Promise<Params> {
+async function loadParameters(): Promise<ConfigResult> {
   let configPath: string | undefined;
   
   // 1. Check if config is provided as an argument
@@ -59,7 +64,7 @@ async function loadParameters(): Promise<Params> {
     if (await exists(configPath)) {
       console.log(`Using configuration from argument: ${configPath}`);
     } else {
-      console.error(`Error: Configuration file specified in arguments not found: ${configPath}`);
+      logError(`Error: Configuration file specified in arguments not found: ${configPath}`);
       Deno.exit(1);
     }
   }
@@ -78,10 +83,10 @@ async function loadParameters(): Promise<Params> {
   
   // 4. Error if no configuration file found
   if (!configPath) {
-    console.error("Error: No configuration file found. Please provide one of the following:");
-    console.error("- Use --config argument to specify the configuration file");
-    console.error("- Place _pre.yml in the current directory");
-    console.error("- Place _pre.yml in the ./pre directory");
+    logWarning("Error: No configuration file found. Please provide one of the following:");
+    logWarning("- Use --config argument to specify the configuration file");
+    logWarning("- Place _pre.yml in the current directory");
+    logWarning("- Place _pre.yml in the ./pre directory");
     Deno.exit(1);
   }
   
@@ -105,6 +110,7 @@ async function loadParameters(): Promise<Params> {
 }
 
 async function executeSteps(steps: Step[], params: Params) {
+  let result;
   for (const step of steps) {
     if (step.displayName) {
       logInfo(`\n:: [ ${step.displayName} ] ::`);
@@ -117,20 +123,18 @@ async function executeSteps(steps: Step[], params: Params) {
     }
 
     try {
-      console.log(`=> ${command}`);
-      let result;
-      if (!hasValueFrom) {
-        result = await $.raw`${command}`.text();
-      } else {
-        result = await $.raw`gum spin --spinner dot --title "${step.displayName}..." --timeout=0 -- ${command}`.text();
-      }
-      console.log(result);
-      //const result = await $.raw`${command}`.stdout("piped");
-      //console.log(result.stdout);
-    } catch (error) {
-      logError(`Error executing bash: ${command}\n\n`);
-      logError(error.message || error);
-      //Deno.exit(1);
+      logWarning(`=> ${command}`);
+      result = await $.raw`${command}`.text();
+      // if (!hasValueFrom) {
+      //   result = await $.raw`${command}`.text();
+      // } else {
+      //   result = await $.raw`gum spin --spinner dot --title "${step.displayName}..." --show-output --timeout=0 -- ${command}`.text();
+      // }
+      logSuccess(` √ ${result}`);
+    } catch (error: unknown) {
+      logError(`\n * Error executing: ${command}\n`);
+      //logError(error.message || error);
+      Deno.exit(1);
     }
   }
 
@@ -139,8 +143,7 @@ async function executeSteps(steps: Step[], params: Params) {
 
 async function main() {
   const { params, steps } = await loadParameters();
-  console.log("=> Loaded parameters:", params);
-
+  console.log(`\n=> Loaded parameters:`, params);
   await executeSteps(steps, params);
 }
 
