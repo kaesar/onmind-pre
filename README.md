@@ -2,6 +2,8 @@
 
 **Predefined Rutinme Environment (PRE)**. A way to prepare and make progressive development, such as scaffolding or local deploy, using **YAML** and linking **Bash** commands in a blueprint. It is a simple **CI/CD** tool also (in its foundations) but starts before of that.
 
+> Basically, the way to operate consists in a **YAML** file where you define **variables** and **steps** with commands (bash sentences), then you are under your imagination (e.g. you can mix with scripts in javascript or python for more elaborated processes, like Service-Connections)
+
 To use **OnMind-PRE**, first set a `_pre.yml` with the following specification example (is similar to basic aspects of **Azure Pipelines**):
 
 ```yml
@@ -21,6 +23,7 @@ steps:
 > `${name}` and `${color}` are used to replace varariables by its values.  
 > `valueFrom` allow reads by `bash` command using `gum` as dependency (like in the example).
 
+To run **OnMind-PRE** binaries check **tags** in this repo.  
 To run **OnMind-PRE** from sources (after clonning), launch the app like this:
 
 ```bash

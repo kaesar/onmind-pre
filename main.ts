@@ -109,6 +109,7 @@ async function loadParameters(): Promise<ConfigResult> {
   return { params, steps: config.steps };
 }
 
+// export
 async function executeSteps(steps: Step[], params: Params) {
   let result;
   for (const step of steps) {
@@ -146,7 +147,7 @@ async function main() {
   console.log(`\n=> Loaded parameters:`, params);
   await executeSteps(steps, params);
 }
-
+/*
 async function checkoutTask() {
   const { bucket_name, project_name, aws_region, git_repo } = await loadParameters();
 
@@ -183,5 +184,5 @@ async function checkoutTask() {
 
   console.log(`CloudFormation generated in: ${outputPath}`);
 }
-
+*/
 main();
