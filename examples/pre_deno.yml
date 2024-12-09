@@ -1,0 +1,14 @@
+# Example for a Deno App with Express (even MongoDB)
+variables:
+- name: repo
+  value: kaesar/denoapp
+
+steps:
+- bash: rm -rf ../output
+  displayName: Clear Output Folder
+- bash: git clone https://github.com/${repo}.git ../output
+  displayName: Clone / Checkout
+#- bash: deno cache ../output/main.ts
+#  displayName: Deno Cache
+#- bash: docker build -t sampleapp:latest ../output -f ../output/Dockerfile
+#  displayName: Dockerize
