@@ -2,6 +2,7 @@ import $ from "@david/dax";
 import { exists, ensureDir } from "https://deno.land/std@0.114.0/fs/mod.ts";
 import { parse as parseYaml } from "https://deno.land/std@0.182.0/yaml/mod.ts";
 import { parse } from "https://deno.land/std@0.182.0/flags/mod.ts";
+// import { parseFlags } from "@cliffy/flags";
 
 interface Variable {
   name: string;
@@ -12,6 +13,7 @@ interface Variable {
 interface Step {
   bash: string;
   displayName?: string;
+  parallel?: boolean;
 }
 
 interface Config {
@@ -59,6 +61,7 @@ async function loadParameters(): Promise<ConfigResult> {
   
   // 1. Check if config is provided as an argument
   const args = parse(Deno.args);
+  const continueOnError = !!args["continue-on-error"];
   if (args.config) {
     configPath = args.config;
     if (await exists(configPath)) {
@@ -92,6 +95,14 @@ async function loadParameters(): Promise<ConfigResult> {
   
   const configText = await Deno.readTextFile(configPath);
   const config = parseYaml(configText) as Config;
+  if (!config.variables || !Array.isArray(config.variables)) {
+    logError("El archivo YAML debe contener una lista 'variables'.");
+    Deno.exit(1);
+  }
+  if (!config.steps || !Array.isArray(config.steps)) {
+    logError("El archivo YAML debe contener una lista 'steps'.");
+    Deno.exit(1);
+  }
 
   const params: Params = {};
   await Promise.all(
@@ -109,37 +120,52 @@ async function loadParameters(): Promise<ConfigResult> {
   return { params, steps: config.steps };
 }
 
-// export
+function substituteVariables(command: string, params: Params): string {
+  // Ordenar por longitud descendente para evitar solapamientos (name2 antes que name)
+  const keys = Object.keys(params).sort((a, b) => b.length - a.length);
+  for (const key of keys) {
+    command = command.replace(new RegExp(`\\$\\{${key}\\}`, 'g'), params[key]);
+  }
+  return command;
+}
+
 async function executeSteps(steps: Step[], params: Params) {
-  let result;
-  for (const step of steps) {
-    if (step.displayName) {
-      logInfo(`\n:: [ ${step.displayName} ] ::`);
+  // Agrupar pasos paralelos y secuenciales
+  let i = 0;
+  while (i < steps.length) {
+    if (steps[i].parallel) {
+      // Ejecutar todos los pasos consecutivos con parallel: true
+      const parallelGroup = [];
+      while (i < steps.length && steps[i].parallel) {
+        parallelGroup.push(steps[i]);
+        i++;
+      }
+      await Promise.all(parallelGroup.map(async (step) => {
+        await runStep(step, params);
+      }));
+    } else {
+      await runStep(steps[i], params);
+      i++;
     }
+  }
+  logSuccess(":: [ Prepared sentences completed successfully ] ::")
+}
 
-    // Replace variables in the bash command
-    let command = step.bash;
-    for (const [key, value] of Object.entries(params)) {
-      command = command.replace(new RegExp(`\\$\\{${key}\\}`, 'g'), value);
-    }
-
-    try {
-      logWarning(`=> ${command}`);
-      result = await $.raw`${command}`.text();
-      // if (!hasValueFrom) {
-      //   result = await $.raw`${command}`.text();
-      // } else {
-      //   result = await $.raw`gum spin --spinner dot --title "${step.displayName}..." --show-output --timeout=0 -- ${command}`.text();
-      // }
-      logSuccess(` √ ${result}`);
-    } catch (error: unknown) {
-      logError(`\n * Error executing: ${command}\n`);
-      //logError(error.message || error);
+async function runStep(step: Step, params: Params) {
+  if (step.displayName) {
+    logInfo(`\n:: [ ${step.displayName} ] ::`);
+  }
+  let command = substituteVariables(step.bash, params);
+  try {
+    logWarning(`=> ${command}`);
+    const result = await $.raw`${command}`.text();
+    logSuccess(` √ ${result}`);
+  } catch (error: unknown) {
+    logError(`\n * Error executing: ${command}\n`);
+    if (!continueOnError) {
       Deno.exit(1);
     }
   }
-
-  logSuccess(":: [ Prepared sentences completed successfully ] ::")
 }
 
 async function main() {

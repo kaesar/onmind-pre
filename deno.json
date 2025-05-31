@@ -1,6 +1,7 @@
 {
-  "version": "0.1.0",
+  "version": "0.2.0",
   "imports": {
     "@david/dax": "jsr:@david/dax@^0.42.0"
+    // "@cliffy/flags": "jsr:@cliffy/flags@^1.0.0-rc.7"
   }
 }
