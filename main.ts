@@ -1,8 +1,24 @@
 #!/usr/bin/env bun
-import { $ } from "bun";
-import { access, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { load as parseYaml } from "js-yaml";
+import { logError, logWarning, logSuccess, logInfo } from "./log.ts";
+import { isAskCommand, resolveAskValue } from "./ask.ts";
+import {
+  type Step,
+  type Params,
+  exists,
+  runShell,
+  substituteVariables,
+  runCheckoutStep,
+  runCopyStep,
+  runDeleteStep,
+  evaluateCondition,
+} from "./step.ts";
+
+// Re-exported so existing importers keep working.
+export { isAskCommand, tokenizeAskArgs } from "./ask.ts";
+export { substituteVariables, deriveRepoDir, evaluateCondition } from "./step.ts";
 
 interface Variable {
   name: string;
@@ -10,20 +26,9 @@ interface Variable {
   valueFrom?: string;
 }
 
-interface Step {
-  bash: string;
-  displayName?: string;
-  parallel?: boolean;
-  continueOnError?: boolean;
-}
-
 interface Config {
   variables: Variable[];
   steps: Step[];
-}
-
-interface Params {
-  [key: string]: string;
 }
 
 interface ConfigResult {
@@ -32,44 +37,13 @@ interface ConfigResult {
   continueOnError: boolean;
 }
 
-const colors = {
-  red: "\x1b[38;2;255;20;60m", // errors
-  yellow: "\x1b[33m", // warnings
-  green: "\x1b[32m", // success
-  blue: "\x1b[38;2;0;157;255m", // info
-  reset: "\x1b[0m",
-};
-
-function logError(message: string) {
-  console.error(`${colors.red}${message}${colors.reset}`);
-}
-
-function logWarning(message: string) {
-  console.warn(`${colors.yellow}${message}${colors.reset}`);
-}
-
-function logSuccess(message: string) {
-  console.log(`${colors.green}${message}${colors.reset}`);
-}
-
-function logInfo(message: string) {
-  console.log(`${colors.blue}${message}${colors.reset}`);
-}
-
-async function exists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// Bun.$ escapes interpolated strings by default, so dynamic shell
-// sentences from YAML must go through `{ raw: command }`
-// (equivalent to dax's $.raw``).
-function runShell(command: string) {
-  return $`${{ raw: command }}`.text();
+async function resolveValueFrom(variable: Variable): Promise<string> {
+  if (variable.value !== undefined) return variable.value;
+  const source = variable.valueFrom as string;
+  // Future interpreters (e.g. `valueFrom: "https://..."` via API) plug in here.
+  if (isAskCommand(source)) return resolveAskValue(variable.name, source);
+  const result = await runShell(source);
+  return result.trim();
 }
 
 let hasValueFrom = false;
@@ -130,37 +104,13 @@ async function loadParameters(): Promise<ConfigResult> {
   }
 
   const params: Params = {};
-  await Promise.all(
-    config.variables?.map(async (variable: Variable) => {
-      if (variable.value !== undefined) {
-        params[variable.name] = variable.value;
-      } else if (variable.valueFrom !== undefined) {
-        // valueRead
-        const result = await runShell(variable.valueFrom);
-        params[variable.name] = result.trim();
-        hasValueFrom = true;
-      }
-    }) || [],
-  );
+  // Sequential resolution: interactive `ask ...` prompts would overlap if run in parallel.
+  for (const variable of config.variables ?? []) {
+    params[variable.name] = await resolveValueFrom(variable);
+    if (variable.valueFrom !== undefined) hasValueFrom = true;
+  }
 
   return { params, steps: config.steps, continueOnError };
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function substituteVariables(command: string, params: Params): string {
-  // Ordenar por longitud descendente para evitar solapamientos (name2 antes que name)
-  // Homologado Azure Pipelines: acepta tanto ${VAR} (PRE) como $(VAR) (Azure).
-  const keys = Object.keys(params).sort((a, b) => b.length - a.length);
-  for (const key of keys) {
-    const escaped = escapeRegExp(key);
-    command = command
-      .replace(new RegExp(`\\$\\{${escaped}\\}`, "g"), params[key])
-      .replace(new RegExp(`\\$\\(${escaped}\\)`, "g"), params[key]);
-  }
-  return command;
 }
 
 async function executeSteps(steps: Step[], params: Params, continueOnError: boolean) {
@@ -189,19 +139,53 @@ async function runStep(step: Step, params: Params, continueOnError: boolean) {
   if (step.displayName) {
     logInfo(`\n:: [ ${step.displayName} ] ::`);
   }
-  const command = substituteVariables(step.bash, params);
   // Homologado Azure Pipelines: continueOnError por step, con fallback al flag global.
   const effectiveContinueOnError = step.continueOnError ?? continueOnError;
   try {
-    logWarning(`=> ${command}`);
-    const result = await runShell(command);
-    logSuccess(` √ ${result.trimEnd()}`);
+    if (step.condition !== undefined) {
+      let run: boolean;
+      try {
+        run = evaluateCondition(step.condition, params);
+      } catch (error: unknown) {
+        throw new Error(`Invalid condition "${step.condition}": ${(error as Error).message}`);
+      }
+      if (!run) {
+        logInfo(`Skipped (condition false): ${step.condition}`);
+        return;
+      }
+    }
+    const kinds = [step.bash, step.checkout, step.copy, step.delete].filter(
+      (k) => k !== undefined,
+    ).length;
+    if (kinds !== 1) {
+      throw new Error("Step must define exactly one of 'bash', 'checkout', 'copy' or 'delete'.");
+    }
+    if (step.checkout !== undefined) {
+      await runCheckoutStep(step, params);
+      return;
+    }
+    if (step.copy !== undefined) {
+      await runCopyStep(step, params);
+      return;
+    }
+    if (step.delete !== undefined) {
+      await runDeleteStep(step, params);
+      return;
+    }
+    await runBashStep(step, params);
   } catch (error: unknown) {
-    logError(`\n * Error executing: ${command}\n`);
+    logError(`\n * Error executing step${step.displayName ? ` "${step.displayName}"` : ""}\n`);
     if (!effectiveContinueOnError) {
       process.exit(1);
     }
   }
+}
+
+async function runBashStep(step: Step, params: Params) {
+  const command = substituteVariables(step.bash as string, params);
+  logWarning(`=> ${command}`);
+  const result = await runShell(command);
+  logSuccess(` √ ${result.trimEnd()}`);
 }
 
 async function main() {
@@ -210,4 +194,6 @@ async function main() {
   await executeSteps(steps, params, continueOnError);
 }
 
-main();
+if (import.meta.main) {
+  main();
+}

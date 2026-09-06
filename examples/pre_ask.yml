@@ -1,0 +1,16 @@
+# Example using valueFrom with a native prompt (no external binary needed)
+# Same variables/steps as the README example, but `ask select`
+# replaces `gum choose`.
+variables:
+- name: name
+  value: there
+- name: color
+  valueFrom: ask select "Blue" "Green" "Pink" "Red" "White" "Yellow"
+
+steps:
+- bash: echo "Hi ${name}"
+  displayName: Hello
+- bash: echo 'Your color is ${color}'
+  displayName: Show color
+- bash: "echo 'Azure syntax also works: ${color} / $(color)'"
+  displayName: Both syntaxes

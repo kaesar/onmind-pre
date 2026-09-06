@@ -11,6 +11,7 @@
     "compile:win": "bun build --compile --target=bun-windows-x64 ./main.ts --outfile onmind-pre-win.exe"
   },
   "dependencies": {
+    "@clack/prompts": "^1.7.0",
     "js-yaml": "^4.1.0"
   },
   "devDependencies": {

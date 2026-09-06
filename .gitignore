@@ -8,6 +8,9 @@ onmind-pre*
 templates/
 output/
 
+# Local working docs (not part of the repo)
+PLAN.md
+
 # Logs
 logs
 *.log
