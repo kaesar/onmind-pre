@@ -1,5 +1,5 @@
 import { $, Glob } from "bun";
-import { access, rm, mkdir, stat, copyFile } from "node:fs/promises";
+import { access, rm, mkdir, stat, copyFile, writeFile } from "node:fs/promises";
 import { join, dirname, basename } from "node:path";
 import { logWarning, logSuccess, logInfo } from "./trace.ts";
 
@@ -36,6 +36,17 @@ export interface Step {
   overwrite?: boolean;
   // `delete: <path|dir|glob>` removes files (glob relative to cwd).
   delete?: string;
+  // Download step (PRE-native, like `checkout` but for HTTP):
+  // `fetch: <url>` saves the response body to `path`
+  // (defaults to `./<basename-of-url>`).
+  fetch?: string;
+  // HTTP method for `fetch` (default GET). Optional `body` (with substitution).
+  method?: string;
+  body?: string;
+  // Optional headers for `fetch` (values accept substitution).
+  headers?: Record<string, string>;
+  // Timeout in seconds for `fetch` (default 30).
+  timeout?: number;
 }
 
 export interface Params {
@@ -73,6 +84,46 @@ export function substituteVariables(command: string, params: Params): string {
       .replace(new RegExp(`\\$\\(${escaped}\\)`, "g"), params[key]);
   }
   return command;
+}
+
+function basenameFromUrl(url: string): string {
+  try {
+    const name = new URL(url).pathname.split("/").filter(Boolean).pop() ?? "";
+    if (name) return name;
+  } catch {
+    // fall through to the error below
+  }
+  throw new Error(`Cannot derive a file name from "${url}". Set 'path:'.`);
+}
+
+export async function runFetchStep(step: Step, params: Params): Promise<void> {
+  const url = substituteVariables(step.fetch as string, params);
+  const method = (step.method ?? "GET").toUpperCase();
+  if (!["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"].includes(method)) {
+    throw new Error(`Unsupported fetch method "${step.method}".`);
+  }
+  const headers: Record<string, string> = {};
+  for (const [k, v] of Object.entries(step.headers ?? {})) {
+    headers[k] = substituteVariables(v, params);
+  }
+  const target = step.path ? substituteVariables(step.path, params) : `./${basenameFromUrl(url)}`;
+  logWarning(`=> ${method} ${url} → ${target}`);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method,
+      headers,
+      body: step.body !== undefined ? substituteVariables(step.body, params) : undefined,
+      signal: AbortSignal.timeout((step.timeout ?? 30) * 1000),
+    });
+  } catch (error: unknown) {
+    throw new Error(`Fetch "${url}" failed: ${(error as Error).message}`);
+  }
+  if (!res.ok) throw new Error(`Fetch "${url}" failed with status ${res.status}.`);
+  await mkdir(dirname(target), { recursive: true });
+  const buf = Buffer.from(await res.arrayBuffer());
+  await writeFile(target, buf);
+  logSuccess(` √ fetched ${buf.length} byte(s) → ${target}`);
 }
 
 export function deriveRepoDir(url: string): string {

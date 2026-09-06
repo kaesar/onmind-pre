@@ -17,13 +17,15 @@ import {
   runCheckoutStep,
   runCopyStep,
   runDeleteStep,
+  runFetchStep,
   evaluateCondition,
 } from "./step.ts";
 
 // Re-exported so existing importers keep working.
 export { isAskCommand, tokenizeAskArgs } from "./value.ts";
 export { parseSets, parseDotenv, resolveValueFrom, type Variable } from "./value.ts";
-export { substituteVariables, deriveRepoDir, evaluateCondition } from "./step.ts";
+export { substituteVariables, deriveRepoDir, evaluateCondition, runFetchStep } from "./step.ts";
+export { selectJsonPath } from "./value.ts";
 
 interface Config {
   variables: Variable[];
@@ -151,11 +153,11 @@ async function runStep(step: Step, params: Params, continueOnError: boolean) {
         return;
       }
     }
-    const kinds = [step.bash, step.checkout, step.copy, step.delete].filter(
+    const kinds = [step.bash, step.checkout, step.copy, step.delete, step.fetch].filter(
       (k) => k !== undefined,
     ).length;
     if (kinds !== 1) {
-      throw new Error("Step must define exactly one of 'bash', 'checkout', 'copy' or 'delete'.");
+      throw new Error("Step must define exactly one of 'bash', 'checkout', 'copy', 'delete' or 'fetch'.");
     }
     if (step.checkout !== undefined) {
       await runCheckoutStep(step, params);
@@ -167,6 +169,10 @@ async function runStep(step: Step, params: Params, continueOnError: boolean) {
     }
     if (step.delete !== undefined) {
       await runDeleteStep(step, params);
+      return;
+    }
+    if (step.fetch !== undefined) {
+      await runFetchStep(step, params);
       return;
     }
     await runBashStep(step, params);

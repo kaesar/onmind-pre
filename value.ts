@@ -8,8 +8,14 @@ export interface Variable {
   value?: string;
   valueFrom?: string;
   // Fallback when the `valueFrom:` source is unavailable
-  // (`arg:` without matching `--set`, `env:` unset, missing file/key).
+  // (`arg:` without matching `--set`, `env:` unset, missing file/key,
+  // failed request).
   default?: string;
+  // Optional headers for `valueFrom: "https://..."` (values accept substitution,
+  // so secrets can come from `env:`/`arg:` params instead of the file).
+  headers?: Record<string, string>;
+  // Timeout in seconds for `valueFrom: "https://..."` (default 30).
+  timeout?: number;
 }
 
 // Native interpreter for `valueFrom: "ask <command> ..."`
@@ -200,9 +206,72 @@ export async function resolveValueFrom(
   if (fileMatch) {
     return readWholeFile(variable, substituteVariables(fileMatch[1], params));
   }
-  // Future interpreters (e.g. `valueFrom: "https://..."` via API) plug in here.
+  // `valueFrom: "https://..."` fetches a value via API (GET, native fetch).
+  if (/^https?:\/\/\S/.test(source.trim())) {
+    return resolveUrlValue(variable, source, params);
+  }
+  // Future interpreters plug in here.
   const result = await runShell(source);
   return result.trim();
+}
+
+export function selectJsonPath(data: unknown, selector: string): unknown {
+  const path = selector.trim().replace(/^\./, "");
+  if (!path) throw new Error("Empty selector.");
+  let current: unknown = data;
+  for (const token of path.split(".")) {
+    const m = /^([^\[\]]+)?(\[(\d+)\])?$/.exec(token);
+    if (!m) throw new Error(`Invalid selector token "${token}".`);
+    if (m[1]) {
+      if (typeof current !== "object" || current === null || !(m[1] in current)) return undefined;
+      current = (current as Record<string, unknown>)[m[1]];
+    }
+    if (m[3] !== undefined) {
+      if (!Array.isArray(current)) return undefined;
+      current = current[Number(m[3])];
+    }
+  }
+  return current;
+}
+
+function urlFallback(variable: Variable, message: string): string {
+  if (variable.default !== undefined) return variable.default;
+  throw new Error(message);
+}
+
+async function resolveUrlValue(variable: Variable, source: string, params: Params): Promise<string> {
+  const parts = source.split("|").map((s) => s.trim());
+  if (parts.length > 2 || !parts[0]) {
+    throw new Error(`Invalid URL valueFrom: "${source}". Use "<url>" or "<url> | <selector>".`);
+  }
+  const [url, selector] = parts;
+  const headers: Record<string, string> = {};
+  for (const [k, v] of Object.entries(variable.headers ?? {})) {
+    headers[k] = substituteVariables(v, params);
+  }
+  const timeoutMs = (variable.timeout ?? 30) * 1000;
+  let res: Response;
+  try {
+    res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (error: unknown) {
+    return urlFallback(variable, `Request to "${url}" failed: ${(error as Error).message}`);
+  }
+  if (!res.ok) {
+    return urlFallback(variable, `Request to "${url}" failed with status ${res.status}.`);
+  }
+  const text = (await res.text()).trim();
+  if (!selector) return text;
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    return urlFallback(variable, `Response from "${url}" is not JSON (selector "${selector}").`);
+  }
+  const value = selectJsonPath(json, selector);
+  if (value === undefined || value === null) {
+    return urlFallback(variable, `Selector "${selector}" not found in response from "${url}".`);
+  }
+  return typeof value === "string" ? value : JSON.stringify(value);
 }
 
 async function readKeyFromDotenv(variable: Variable, filePath: string, key: string): Promise<string> {

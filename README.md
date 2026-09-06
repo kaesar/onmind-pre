@@ -31,6 +31,8 @@ In this way...
 - Variables also accept Azure Pipelines macro syntax `$(name)` besides `${name}`.
 - Steps accept `continueOnError: true/false` per step (Azure-style), falling back to the `--continue-on-error` global flag.
 
+> A step must define exactly one of `bash`, `checkout`, `copy`, `delete` or `fetch`
+
 ### Native prompts (`ask`)
 
 If `valueFrom` starts with the reserved word `ask`, the value is read with a native prompt (no external binary needed). Anything else (including `gum ...`) still runs as a shell command:
@@ -96,7 +98,7 @@ variables:
 
 ### Checkout
 
-A step can clone a repository instead of running a `bash` command (homologated with Azure Pipelines `steps.checkout`; a step must define either `bash` or `checkout`, not both):
+A step can clone a repository instead of running a `bash` command (homologated with Azure Pipelines `steps.checkout`:
 
 ```yml
 steps:
@@ -125,7 +127,7 @@ steps:
 
 ### Files
 
-Steps can copy or delete files instead of running `bash` (homologated with Azure `CopyFiles@2` / `DeleteFiles@1`; a step must define exactly one of `bash`, `checkout`, `copy` or `delete`):
+Steps can copy or delete files instead of running `bash` (homologated with Azure `CopyFiles@2` / `DeleteFiles@1`:
 
 ```yml
 steps:
@@ -142,12 +144,45 @@ steps:
 
 > `target` is always a directory (created if missing). `contents` defaults to all files (`dotfiles` included); `!` negates a pattern. `clean: true` removes the target first; `overwrite: false` keeps existing files. `delete` accepts a literal path/dir or a glob relative to the working directory. Variables accept both `${var}` and `$(var)`, and `displayName`, `condition`, `continueOnError` and `parallel` work as with `bash` steps.
 
+### HTTP
+
+No `curl`/`jq` needed (native `fetch`, PRE-native — neither Azure nor GHA has a generic HTTP step). Variables can be fetched from an API, and steps can download files or call APIs:
+
+```yml
+variables:
+- name: tag
+  valueFrom: https://api.github.com/repos/myorg/myrepo/releases/latest | .tag_name
+  headers:
+    Authorization: Bearer ${GITHUB_TOKEN}
+```
+
+```yml
+steps:
+- fetch: https://example.com/pkg.tgz
+  path: ./downloads/pkg.tgz
+  displayName: Download package
+- fetch: https://api.example.com/deploy
+  method: POST
+  headers:
+    Authorization: Bearer ${TOKEN}
+  body: '{"tag":"${tag}"}'
+  path: ./logs/deploy.json
+```
+
+> `valueFrom: "<url>"` returns the trimmed body, or the value at `"<url> | <selector>"` (`.a.b[0].c` syntax) parsed as JSON. `fetch:` saves raw bytes (`path` defaults to `./<basename-of-url>`). Non-2xx responses fail fast unless `default:` (variables) / `continueOnError` (steps) is set. `timeout:` (seconds, default 30) applies to both. Secrets stay out of the file by sourcing header values from `env:`/`arg:` params.
+
+Try it with the bundled example (needs internet):
+
+```bash
+bun main.ts --config examples/pre_url.yml
+```
+
 ## Lauching
 
 To run **OnMind-PRE** from binaries just check [**release**](https://github.com/kaesar/onmind-pre/releases) in this repo and download the file for your system. Then, launch the app like this:
 
 ```bash
-./onmind-pre-mac --config examples/pre_deno.yml
+./onmind-pre-mac --config examples/pre_app.yml
 ```
 
 > `onmind-pre-mac` is the version for **macOS**, but it could be `onmind-pre-win` for **Windows**, even a version for **Linux**  
@@ -157,7 +192,7 @@ Alternatively, to run **OnMind-PRE** from sources, after clonning, launch the ap
 
 ```bash
 bun install
-bun main.ts --config examples/pre_deno.yml
+bun main.ts --config examples/pre_app.yml
 ```
 
 > You can add the `--config` argument with the path and `yml` file with configuration.  

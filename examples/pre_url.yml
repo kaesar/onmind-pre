@@ -1,0 +1,18 @@
+# Example using HTTP: valueFrom with url + fetch steps (no curl/jq needed)
+variables:
+- name: zen
+  valueFrom: https://api.github.com/zen
+- name: userApi
+  valueFrom: https://api.github.com | .current_user_url
+
+steps:
+- delete: ./output
+  displayName: Clean output
+- fetch: https://api.github.com/zen
+  path: ./output/zen.txt
+  displayName: Download zen
+- bash: cat ./output/zen.txt
+  displayName: Show zen
+- bash: "echo 'user API: ${userApi}'"
+  displayName: Show API URL
+  condition: startsWith('${userApi}', 'https://')

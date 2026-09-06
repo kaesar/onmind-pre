@@ -5,7 +5,7 @@
   "type": "module",
   "main": "main.ts",
   "scripts": {
-    "start": "bun main.ts --config examples/pre_deno.yml",
+    "start": "bun main.ts --config examples/pre_app.yml",
     "compile:mac": "bun build --compile ./main.ts --outfile onmind-pre-mac",
     "compile:linux": "bun build --compile --target=bun-linux-x64 ./main.ts --outfile onmind-pre-linux",
     "compile:win": "bun build --compile --target=bun-windows-x64 ./main.ts --outfile onmind-pre-win.exe"
