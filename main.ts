@@ -2,8 +2,12 @@
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { load as parseYaml } from "js-yaml";
-import { logError, logWarning, logSuccess, logInfo } from "./log.ts";
-import { isAskCommand, resolveAskValue } from "./ask.ts";
+import { logError, logWarning, logSuccess, logInfo } from "./trace.ts";
+import {
+  type Variable,
+  parseSets,
+  resolveValueFrom,
+} from "./value.ts";
 import {
   type Step,
   type Params,
@@ -17,14 +21,9 @@ import {
 } from "./step.ts";
 
 // Re-exported so existing importers keep working.
-export { isAskCommand, tokenizeAskArgs } from "./ask.ts";
+export { isAskCommand, tokenizeAskArgs } from "./value.ts";
+export { parseSets, parseDotenv, resolveValueFrom, type Variable } from "./value.ts";
 export { substituteVariables, deriveRepoDir, evaluateCondition } from "./step.ts";
-
-interface Variable {
-  name: string;
-  value?: string;
-  valueFrom?: string;
-}
 
 interface Config {
   variables: Variable[];
@@ -35,15 +34,6 @@ interface ConfigResult {
   params: Params;
   steps: Step[];
   continueOnError: boolean;
-}
-
-async function resolveValueFrom(variable: Variable): Promise<string> {
-  if (variable.value !== undefined) return variable.value;
-  const source = variable.valueFrom as string;
-  // Future interpreters (e.g. `valueFrom: "https://..."` via API) plug in here.
-  if (isAskCommand(source)) return resolveAskValue(variable.name, source);
-  const result = await runShell(source);
-  return result.trim();
 }
 
 let hasValueFrom = false;
@@ -57,10 +47,12 @@ async function loadParameters(): Promise<ConfigResult> {
     options: {
       config: { type: "string" },
       "continue-on-error": { type: "boolean", default: false },
+      set: { type: "string", multiple: true },
     },
     allowPositionals: true,
   });
   const continueOnError = !!args["continue-on-error"];
+  const cliSets = parseSets(args.set);
   if (args.config) {
     configPath = args.config;
     if (await exists(configPath)) {
@@ -106,7 +98,12 @@ async function loadParameters(): Promise<ConfigResult> {
   const params: Params = {};
   // Sequential resolution: interactive `ask ...` prompts would overlap if run in parallel.
   for (const variable of config.variables ?? []) {
-    params[variable.name] = await resolveValueFrom(variable);
+    try {
+      params[variable.name] = await resolveValueFrom(variable, cliSets, params);
+    } catch (error: unknown) {
+      logError(`Error resolving variable "${variable.name}": ${(error as Error).message}`);
+      process.exit(1);
+    }
     if (variable.valueFrom !== undefined) hasValueFrom = true;
   }
 

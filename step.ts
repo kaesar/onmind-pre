@@ -1,7 +1,7 @@
 import { $, Glob } from "bun";
 import { access, rm, mkdir, stat, copyFile } from "node:fs/promises";
 import { join, dirname, basename } from "node:path";
-import { logWarning, logSuccess, logInfo } from "./log.ts";
+import { logWarning, logSuccess, logInfo } from "./trace.ts";
 
 export interface Step {
   bash?: string;

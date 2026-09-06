@@ -59,6 +59,41 @@ Try it with the bundled example (uses `ask select`, no `gum` needed):
 bun main.ts --config examples/pre_ask.yml
 ```
 
+### Arguments (`--set`)
+
+For non-interactive runs (scripts, CI), feed variables from the command line instead of prompting:
+
+```bash
+bun main.ts --config deploy.yml --set env=prod --set tag=v2
+```
+
+```yml
+variables:
+- name: env
+  valueFrom: arg        # key defaults to the variable name (= --set env=...)
+- name: tag
+  valueFrom: arg:tag    # explicit key
+  default: latest       # fallback when --set is absent
+- name: token
+  valueFrom: env:API_TOKEN  # from the environment (CI secrets friendly)
+```
+
+> Precedence: `--set` wins over anything declared in the file. `arg:` without matching `--set` (and without `default:`) fails fast with a clear error; same for unset `env:`.
+
+### Values from files
+
+Variables can also be sourced from files (same `default:` fallback rules as above):
+
+```yml
+variables:
+- name: token
+  valueFrom: dotenv:.env:API_TOKEN  # KEY from a dotenv file (comments, quotes, `export` supported)
+- name: version
+  valueFrom: file:VERSION           # whole file content, trimmed
+```
+
+> The path can reference variables resolved earlier (e.g. `dotenv:${envDir}/.env:KEY`). Missing file or KEY fails fast unless `default:` is set.
+
 ### Checkout
 
 A step can clone a repository instead of running a `bash` command (homologated with Azure Pipelines `steps.checkout`; a step must define either `bash` or `checkout`, not both):
