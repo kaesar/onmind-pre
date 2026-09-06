@@ -22,8 +22,12 @@ steps:
 - bash: echo 'Your color is ${color}'
 ```
 
-> `${name}` and `${color}` are used to replace varariables by its values.  
-> `valueFrom` allow reads by `bash` command using `gum` as dependency (like in the example).
+In this way...
+
+- `${name}` and `${color}` are used to replace varariables by its values.  
+- `valueFrom` allow reads by `bash` command using `gum` as dependency (like in the example, but isn't Azure Pipelines compatible).  
+- Variables also accept Azure Pipelines macro syntax `$(name)` besides `${name}`.
+- Steps accept `continueOnError: true/false` per step (Azure-style), falling back to the `--continue-on-error` global flag.
 
 ## Lauching
 
@@ -39,15 +43,17 @@ To run **OnMind-PRE** from binaries just check [**release**](https://github.com/
 Alternatively, to run **OnMind-PRE** from sources, after clonning, launch the app like this:
 
 ```bash
-deno add jsr:@david/dax
-deno run --allow-read --allow-write --allow-env --allow-run main.ts --config examples/pre_deno.yml
+bun install
+bun main.ts --config examples/pre_deno.yml
 ```
 
 > You can add the `--config` argument with the path and `yml` file with configuration.  
 > To use `gum` with `valueFrom` in `variables`, install it first, e.g.: `go install github.com/charmbracelet/gum@latest`
 
-<!--
+To compile **OnMind-PRE** into self-contained binaries (requires **Bun**):
+
 ```bash
-deno compile --no-check --allow-read --allow-write --allow-env --allow-run -o onmind-pre main.ts
+bun build --compile ./main.ts --outfile onmind-pre-mac
+bun build --compile --target=bun-linux-x64 ./main.ts --outfile onmind-pre-linux
+bun build --compile --target=bun-windows-x64 ./main.ts --outfile onmind-pre-win.exe
 ```
--->

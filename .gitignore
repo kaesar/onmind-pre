@@ -5,7 +5,6 @@ pre.yml
 pre.yaml
 pre.json
 onmind-pre*
-deno.lock
 templates/
 output/
 

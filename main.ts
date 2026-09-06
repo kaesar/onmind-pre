@@ -1,8 +1,8 @@
-import $ from "@david/dax";
-import { exists, ensureDir } from "https://deno.land/std@0.114.0/fs/mod.ts";
-import { parse as parseYaml } from "https://deno.land/std@0.182.0/yaml/mod.ts";
-import { parse } from "https://deno.land/std@0.182.0/flags/mod.ts";
-// import { parseFlags } from "@cliffy/flags";
+#!/usr/bin/env bun
+import { $ } from "bun";
+import { access, readFile } from "node:fs/promises";
+import { parseArgs } from "node:util";
+import { load as parseYaml } from "js-yaml";
 
 interface Variable {
   name: string;
@@ -14,6 +14,7 @@ interface Step {
   bash: string;
   displayName?: string;
   parallel?: boolean;
+  continueOnError?: boolean;
 }
 
 interface Config {
@@ -28,14 +29,15 @@ interface Params {
 interface ConfigResult {
   params: Params;
   steps: Step[];
+  continueOnError: boolean;
 }
 
 const colors = {
-  red: '\x1b[38;2;255;20;60m',    // errors
-  yellow: '\x1b[33m',             // warnings
-  green: '\x1b[32m',              // success
-  blue: '\x1b[38;2;0;157;255m',   // info
-  reset: '\x1b[0m'
+  red: "\x1b[38;2;255;20;60m", // errors
+  yellow: "\x1b[33m", // warnings
+  green: "\x1b[32m", // success
+  blue: "\x1b[38;2;0;157;255m", // info
+  reset: "\x1b[0m",
 };
 
 function logError(message: string) {
@@ -54,13 +56,36 @@ function logInfo(message: string) {
   console.log(`${colors.blue}${message}${colors.reset}`);
 }
 
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Bun.$ escapes interpolated strings by default, so dynamic shell
+// sentences from YAML must go through `{ raw: command }`
+// (equivalent to dax's $.raw``).
+function runShell(command: string) {
+  return $`${{ raw: command }}`.text();
+}
+
 let hasValueFrom = false;
 
 async function loadParameters(): Promise<ConfigResult> {
   let configPath: string | undefined;
-  
+
   // 1. Check if config is provided as an argument
-  const args = parse(Deno.args);
+  const { values: args } = parseArgs({
+    args: process.argv.slice(2),
+    options: {
+      config: { type: "string" },
+      "continue-on-error": { type: "boolean", default: false },
+    },
+    allowPositionals: true,
+  });
   const continueOnError = !!args["continue-on-error"];
   if (args.config) {
     configPath = args.config;
@@ -68,40 +93,40 @@ async function loadParameters(): Promise<ConfigResult> {
       console.log(`Using configuration from argument: ${configPath}`);
     } else {
       logError(`Error: Configuration file specified in arguments not found: ${configPath}`);
-      Deno.exit(1);
+      process.exit(1);
     }
   }
-  
+
   // 2. Check ./_pre.yml if no argument provided
-  if (!configPath && await exists("./_pre.yml")) {
+  if (!configPath && (await exists("./_pre.yml"))) {
     configPath = "./_pre.yml";
     console.log("Using configuration from ./_pre.yml");
   }
-  
+
   // 3. Check ./pre/_pre.yml if previous locations not found
-  if (!configPath && await exists("./pre/_pre.yml")) {
+  if (!configPath && (await exists("./pre/_pre.yml"))) {
     configPath = "./pre/_pre.yml";
     console.log("Using configuration from ./pre/_pre.yml");
   }
-  
+
   // 4. Error if no configuration file found
   if (!configPath) {
     logWarning("Error: No configuration file found. Please provide one of the following:");
     logWarning("- Use --config argument to specify the configuration file");
     logWarning("- Place _pre.yml in the current directory");
     logWarning("- Place _pre.yml in the ./pre directory");
-    Deno.exit(1);
+    process.exit(1);
   }
-  
-  const configText = await Deno.readTextFile(configPath);
+
+  const configText = await readFile(configPath as string, "utf-8");
   const config = parseYaml(configText) as Config;
   if (!config.variables || !Array.isArray(config.variables)) {
     logError("El archivo YAML debe contener una lista 'variables'.");
-    Deno.exit(1);
+    process.exit(1);
   }
   if (!config.steps || !Array.isArray(config.steps)) {
     logError("El archivo YAML debe contener una lista 'steps'.");
-    Deno.exit(1);
+    process.exit(1);
   }
 
   const params: Params = {};
@@ -109,27 +134,36 @@ async function loadParameters(): Promise<ConfigResult> {
     config.variables?.map(async (variable: Variable) => {
       if (variable.value !== undefined) {
         params[variable.name] = variable.value;
-      } else if (variable.valueFrom !== undefined) {  // valueRead
-        const result = await $.raw`${variable.valueFrom}`.text();
-        params[variable.name] = result;
+      } else if (variable.valueFrom !== undefined) {
+        // valueRead
+        const result = await runShell(variable.valueFrom);
+        params[variable.name] = result.trim();
         hasValueFrom = true;
       }
-    }) || []
+    }) || [],
   );
 
-  return { params, steps: config.steps };
+  return { params, steps: config.steps, continueOnError };
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function substituteVariables(command: string, params: Params): string {
   // Ordenar por longitud descendente para evitar solapamientos (name2 antes que name)
+  // Homologado Azure Pipelines: acepta tanto ${VAR} (PRE) como $(VAR) (Azure).
   const keys = Object.keys(params).sort((a, b) => b.length - a.length);
   for (const key of keys) {
-    command = command.replace(new RegExp(`\\$\\{${key}\\}`, 'g'), params[key]);
+    const escaped = escapeRegExp(key);
+    command = command
+      .replace(new RegExp(`\\$\\{${escaped}\\}`, "g"), params[key])
+      .replace(new RegExp(`\\$\\(${escaped}\\)`, "g"), params[key]);
   }
   return command;
 }
 
-async function executeSteps(steps: Step[], params: Params) {
+async function executeSteps(steps: Step[], params: Params, continueOnError: boolean) {
   // Agrupar pasos paralelos y secuenciales
   let i = 0;
   while (i < steps.length) {
@@ -141,74 +175,39 @@ async function executeSteps(steps: Step[], params: Params) {
         i++;
       }
       await Promise.all(parallelGroup.map(async (step) => {
-        await runStep(step, params);
+        await runStep(step, params, continueOnError);
       }));
     } else {
-      await runStep(steps[i], params);
+      await runStep(steps[i], params, continueOnError);
       i++;
     }
   }
-  logSuccess(":: [ Prepared sentences completed successfully ] ::")
+  logSuccess(":: [ Prepared sentences completed successfully ] ::");
 }
 
-async function runStep(step: Step, params: Params) {
+async function runStep(step: Step, params: Params, continueOnError: boolean) {
   if (step.displayName) {
     logInfo(`\n:: [ ${step.displayName} ] ::`);
   }
-  let command = substituteVariables(step.bash, params);
+  const command = substituteVariables(step.bash, params);
+  // Homologado Azure Pipelines: continueOnError por step, con fallback al flag global.
+  const effectiveContinueOnError = step.continueOnError ?? continueOnError;
   try {
     logWarning(`=> ${command}`);
-    const result = await $.raw`${command}`.text();
-    logSuccess(` √ ${result}`);
+    const result = await runShell(command);
+    logSuccess(` √ ${result.trimEnd()}`);
   } catch (error: unknown) {
     logError(`\n * Error executing: ${command}\n`);
-    if (!continueOnError) {
-      Deno.exit(1);
+    if (!effectiveContinueOnError) {
+      process.exit(1);
     }
   }
 }
 
 async function main() {
-  const { params, steps } = await loadParameters();
+  const { params, steps, continueOnError } = await loadParameters();
   console.log(`\n=> Loaded parameters:`, params);
-  await executeSteps(steps, params);
+  await executeSteps(steps, params, continueOnError);
 }
-/*
-async function checkoutTask() {
-  const { bucket_name, project_name, aws_region, git_repo } = await loadParameters();
 
-  if (!git_repo.endsWith(".git")) {
-    console.error("El repositorio debe terminar con .git");
-    Deno.exit(1);
-  }
-
-  const repoName = git_repo.split("/").pop()?.replace(".git", "") || "cloned_repo";
-  const clonePath = `./${repoName}`;
-
-  if (await exists(clonePath)) {
-    console.log(`El repositorio ${repoName} ya existe en ${clonePath}. Omitiendo clonación.`);
-  } else {
-    console.log(`Clonando ${git_repo} en ${clonePath}...`);
-    await $`git clone ${git_repo} ${clonePath}`;
-    console.log("Repositorio clonado con éxito.");
-  }
-
-  $.cd(clonePath);
-
-  const templatePath = `./templates/s3_bucket.yaml`;
-  const template = await Deno.readTextFile(templatePath);
-
-  const output = template
-    .replace("${name}", name)
-    .replace("${bucketName}", bucket_name)
-    .replace("${projectName}", project_name)
-    .replace("${awsRegion}", aws_region);
-
-  const outputPath = `${clonePath}/output/s3_bucket.yaml`;
-  await ensureDir(`${clonePath}/output`);
-  await Deno.writeTextFile(outputPath, output);
-
-  console.log(`CloudFormation generated in: ${outputPath}`);
-}
-*/
 main();
