@@ -1,5 +1,5 @@
 import { $, Glob } from "bun";
-import { access, rm, mkdir, stat, copyFile, writeFile } from "node:fs/promises";
+import { access, rm, mkdir, stat, copyFile, writeFile, readFile } from "node:fs/promises";
 import { join, dirname, basename } from "node:path";
 import { logWarning, logSuccess, logInfo } from "./trace.ts";
 
@@ -36,6 +36,11 @@ export interface Step {
   overwrite?: boolean;
   // `delete: <path|dir|glob>` removes files (glob relative to cwd).
   delete?: string;
+  // Template step (PRE-native, scaffolding core): `template: <src-file>`
+  // renders `${var}` / `$(var)` with the run params into `target`.
+  // If `target` is a directory (or ends with `/`), the file name is taken
+  // from the source with a trailing `.tpl` stripped (`app.yaml.tpl` → `app.yaml`).
+  template?: string;
   // Download step (PRE-native, like `checkout` but for HTTP):
   // `fetch: <url>` saves the response body to `path`
   // (defaults to `./<basename-of-url>`).
@@ -202,15 +207,38 @@ export async function runDeleteStep(step: Step, params: Params): Promise<void> {
   else logSuccess(` √ deleted ${count} path(s) matching "${raw}"`);
 }
 
-// --- Azure-style `condition:` (v1 cheap subset) ---
+export async function runTemplateStep(step: Step, params: Params): Promise<void> {
+  if (!step.target) throw new Error("'template' step requires 'target'.");
+  const source = substituteVariables(step.template as string, params);
+  let target = substituteVariables(step.target, params);
+  let text: string;
+  try {
+    text = await readFile(source, "utf-8");
+  } catch {
+    throw new Error(`Template not found: "${source}".`);
+  }
+  if (target.endsWith("/")) {
+    target = join(target, basename(source).replace(/\.tpl$/, ""));
+  } else {
+    const st = await stat(target).catch(() => null);
+    if (st?.isDirectory()) {
+      target = join(target, basename(source).replace(/\.tpl$/, ""));
+    }
+  }
+  await mkdir(dirname(target), { recursive: true });
+  await writeFile(target, substituteVariables(text, params));
+  logSuccess(` √ rendered ${source} → ${target}`);
+}
+
+// --- Azure-style `condition:` ---
 // Supported: always(), succeeded(), failed(), succeededOrFailed(),
 // not(x), and(...), or(...), eq(a, b), ne(a, b),
 // contains(haystack, needle), startsWith(s, prefix), endsWith(s, suffix).
 // Variable references (`${V}` / `$(V)`, `variables['V']`, `variables.V`)
 // are substituted before evaluation.
-// NOTE (v1 limitation): with the current fail-fast semantics, a step only
-// runs when nothing failed yet, so succeeded() is always true and failed()
-// always false when evaluated. Dynamic failure tracking is a v2 feature.
+// Status functions read the run status: `succeeded()` is false once a step
+// failed without `continueOnError`; `failed()` mirrors it; `always()` and
+// `succeededOrFailed()` are always true.
 const CONDITION_FUNCTIONS = [
   "always",
   "succeeded",
@@ -232,9 +260,16 @@ function quoteLiteral(value: string): string {
 
 type ConditionValue = string | boolean | number;
 
+export interface RunStatus {
+  failed: boolean;
+}
+
 class ConditionParser {
   private pos = 0;
-  constructor(private readonly input: string) {}
+  constructor(
+    private readonly input: string,
+    private readonly status: RunStatus,
+  ) {}
 
   evaluate(): ConditionValue {
     const value = this.parseValue();
@@ -309,7 +344,7 @@ class ConditionParser {
     this.skipWs();
     if (this.input[this.pos] !== ")") throw new Error(`Expected ")" in condition.`);
     this.pos++;
-    return applyConditionFunction(name, args);
+    return applyConditionFunction(name, args, this.status);
   }
 }
 
@@ -320,16 +355,22 @@ function asBoolean(value: ConditionValue, fn: string): boolean {
   return value;
 }
 
-function applyConditionFunction(name: string, args: ConditionValue[]): ConditionValue {
+function applyConditionFunction(
+  name: string,
+  args: ConditionValue[],
+  status: RunStatus,
+): ConditionValue {
   switch (name) {
     case "always":
-    case "succeeded":
     case "succeededOrFailed":
       if (args.length !== 0) throw new Error(`"${name}()" takes no arguments.`);
       return true;
+    case "succeeded":
+      if (args.length !== 0) throw new Error(`"succeeded()" takes no arguments.`);
+      return !status.failed;
     case "failed":
       if (args.length !== 0) throw new Error(`"failed()" takes no arguments.`);
-      return false; // v1 limitation, see note above.
+      return status.failed;
     case "not":
       if (args.length !== 1) throw new Error(`"not()" takes exactly 1 argument.`);
       return !asBoolean(args[0], "not");
@@ -359,7 +400,7 @@ function applyConditionFunction(name: string, args: ConditionValue[]): Condition
   }
 }
 
-export function evaluateCondition(condition: string, params: Params): boolean {
+export function evaluateCondition(condition: string, params: Params, status: RunStatus = { failed: false }): boolean {
   if (!condition.trim()) throw new Error("Empty condition.");
   // Azure `variables['X']` / `variables["X"]` / `variables.X` → literal value.
   let expr = condition
@@ -369,7 +410,7 @@ export function evaluateCondition(condition: string, params: Params): boolean {
   expr = substituteVariables(expr, params);
   // Azure semantics: unknown macros expand to empty string.
   expr = expr.replace(/\$\{[^}]+\}/g, "").replace(/\$\([^)]+\)/g, "");
-  const value = new ConditionParser(expr).evaluate();
+  const value = new ConditionParser(expr, status).evaluate();
   if (typeof value !== "boolean") {
     throw new Error(`Condition must evaluate to true/false (got "${condition}").`);
   }

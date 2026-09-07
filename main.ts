@@ -8,9 +8,11 @@ import {
   parseSets,
   resolveValueFrom,
 } from "./value.ts";
+import { type Parameter, resolveParameters } from "./params.ts";
 import {
   type Step,
   type Params,
+  type RunStatus,
   exists,
   runShell,
   substituteVariables,
@@ -18,6 +20,7 @@ import {
   runCopyStep,
   runDeleteStep,
   runFetchStep,
+  runTemplateStep,
   evaluateCondition,
 } from "./step.ts";
 
@@ -28,6 +31,7 @@ export { substituteVariables, deriveRepoDir, evaluateCondition, runFetchStep } f
 export { selectJsonPath } from "./value.ts";
 
 interface Config {
+  parameters?: Parameter[];
   variables: Variable[];
   steps: Step[];
 }
@@ -98,8 +102,19 @@ async function loadParameters(): Promise<ConfigResult> {
   }
 
   const params: Params = {};
+  // Input contract first: parameters seed the run and are validated upfront.
+  try {
+    Object.assign(params, await resolveParameters(config.parameters, cliSets));
+  } catch (error: unknown) {
+    logError(`Invalid parameters declaration: ${(error as Error).message}`);
+    process.exit(1);
+  }
   // Sequential resolution: interactive `ask ...` prompts would overlap if run in parallel.
   for (const variable of config.variables ?? []) {
+    if (variable.name in params) {
+      logError(`Variable "${variable.name}" duplicates a parameter.`);
+      process.exit(1);
+    }
     try {
       params[variable.name] = await resolveValueFrom(variable, cliSets, params);
     } catch (error: unknown) {
@@ -108,11 +123,20 @@ async function loadParameters(): Promise<ConfigResult> {
     }
     if (variable.valueFrom !== undefined) hasValueFrom = true;
   }
+  const known = new Set([
+    ...(config.parameters ?? []).map((q) => q.name),
+    ...(config.variables ?? []).map((v) => v.name),
+  ]);
+  const unknown = Object.keys(cliSets).filter((k) => !known.has(k));
+  if (unknown.length > 0) {
+    logWarning(`Warning: --set ${unknown.join(", ")} matches no parameter or variable.`);
+  }
 
   return { params, steps: config.steps, continueOnError };
 }
 
 async function executeSteps(steps: Step[], params: Params, continueOnError: boolean) {
+  const status: RunStatus = { failed: false };
   // Agrupar pasos paralelos y secuenciales
   let i = 0;
   while (i < steps.length) {
@@ -124,40 +148,49 @@ async function executeSteps(steps: Step[], params: Params, continueOnError: bool
         i++;
       }
       await Promise.all(parallelGroup.map(async (step) => {
-        await runStep(step, params, continueOnError);
+        await runStep(step, params, continueOnError, status);
       }));
     } else {
-      await runStep(steps[i], params, continueOnError);
+      await runStep(steps[i], params, continueOnError, status);
       i++;
     }
+  }
+  // Azure semantics: the run fails if any step failed without continueOnError,
+  // even when failed()/always() steps ran afterwards.
+  if (status.failed) {
+    logError(":: [ Completed with failures ] ::");
+    process.exit(1);
   }
   logSuccess(":: [ Prepared sentences completed successfully ] ::");
 }
 
-async function runStep(step: Step, params: Params, continueOnError: boolean) {
+async function runStep(step: Step, params: Params, continueOnError: boolean, status: RunStatus) {
   if (step.displayName) {
     logInfo(`\n:: [ ${step.displayName} ] ::`);
   }
   // Homologado Azure Pipelines: continueOnError por step, con fallback al flag global.
   const effectiveContinueOnError = step.continueOnError ?? continueOnError;
+  // Default condition is succeeded(): after a failure only steps opting into
+  // failed()/always()/succeededOrFailed() still run.
+  const condSrc = step.condition ?? "succeeded()";
   try {
-    if (step.condition !== undefined) {
-      let run: boolean;
-      try {
-        run = evaluateCondition(step.condition, params);
-      } catch (error: unknown) {
-        throw new Error(`Invalid condition "${step.condition}": ${(error as Error).message}`);
-      }
-      if (!run) {
-        logInfo(`Skipped (condition false): ${step.condition}`);
-        return;
-      }
+    let run: boolean;
+    try {
+      run = evaluateCondition(condSrc, params, status);
+    } catch (error: unknown) {
+      throw new Error(`Invalid condition "${condSrc}": ${(error as Error).message}`);
     }
-    const kinds = [step.bash, step.checkout, step.copy, step.delete, step.fetch].filter(
+    if (!run) {
+      logInfo(`Skipped (condition "${condSrc}" is false).`);
+      return;
+    }
+    const kinds = [step.bash, step.checkout, step.copy, step.delete, step.fetch, step.template].filter(
       (k) => k !== undefined,
     ).length;
     if (kinds !== 1) {
-      throw new Error("Step must define exactly one of 'bash', 'checkout', 'copy', 'delete' or 'fetch'.");
+      throw new Error(
+        "Step must define exactly one of 'bash', 'checkout', 'copy', 'delete', 'fetch' or 'template'.",
+      );
     }
     if (step.checkout !== undefined) {
       await runCheckoutStep(step, params);
@@ -175,11 +208,23 @@ async function runStep(step: Step, params: Params, continueOnError: boolean) {
       await runFetchStep(step, params);
       return;
     }
+    if (step.template !== undefined) {
+      await runTemplateStep(step, params);
+      return;
+    }
     await runBashStep(step, params);
   } catch (error: unknown) {
+    const message = (error as Error).message;
+    // Authoring bugs fail fast with a clear message.
+    if (message.startsWith("Invalid condition") || message.startsWith("Step must define")) {
+      logError(`\n * ${message}\n`);
+      process.exit(1);
+    }
+    // Execution failures set the run status instead of exiting, so
+    // failed()/always() steps still run; the exit code is decided at the end.
     logError(`\n * Error executing step${step.displayName ? ` "${step.displayName}"` : ""}\n`);
     if (!effectiveContinueOnError) {
-      process.exit(1);
+      status.failed = true;
     }
   }
 }

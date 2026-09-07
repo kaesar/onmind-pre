@@ -1,0 +1,24 @@
+# Example: template rendering + failure handling (failed()/always()).
+# Expected outcome: Notify + Cleanup run, Skipped is skipped, exit code is 1.
+variables:
+- name: app
+  value: demo
+- name: env
+  value: dev
+
+steps:
+- template: ./examples/tpl/app.txt.tpl
+  target: ./output/
+  displayName: Render template
+- bash: "echo 'deploying ${app} to ${env}'"
+  displayName: Deploy
+- bash: exit 1
+  displayName: Failing step
+- bash: "echo 'notify: ${app} failed on ${env}'"
+  displayName: Notify
+  condition: failed()
+- bash: "echo 'cleanup ${app}'"
+  displayName: Cleanup
+  condition: always()
+- bash: "echo 'should not print'"
+  displayName: Skipped

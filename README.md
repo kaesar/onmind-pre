@@ -82,6 +82,29 @@ variables:
 
 > Precedence: `--set` wins over anything declared in the file. `arg:` without matching `--set` (and without `default:`) fails fast with a clear error; same for unset `env:`.
 
+### Parameters
+
+`parameters:` is the blueprint's **input contract** (homologated with Azure Pipelines runtime parameters — the ones behind the "Run pipeline" form). Distinction: `valueFrom: arg` is the *read mechanism* for one variable; `parameters:` declares *what the blueprint accepts, with types, allowed values and required-ness* — validated **before** anything runs:
+
+```yml
+parameters:
+- name: env
+  values: [dev, prod]   # allowed values (prompted as select when missing)
+  default: dev
+- name: replicas
+  type: number          # string (default) | number | boolean
+  default: 2
+- name: token
+  type: string          # no default = required
+  displayName: API token
+
+variables:
+- name: app
+  value: demo
+```
+
+> Supplied values are type-checked and canonicalized (`03`→`3`, `yes`→`true`); all problems are reported at once, fail-fast. A missing required parameter is **prompted** in interactive terminals (select for `values:`, confirm for `boolean`, text otherwise — the terminal "Run pipeline" form) and errors out in CI. Resolved parameters seed the run, so `variables:`/`steps:` use them like any other variable; a variable duplicating a parameter name is an error. Unknown `--set` keys warn without stopping.
+
 ### Values from files
 
 Variables can also be sourced from files (same `default:` fallback rules as above):
@@ -123,7 +146,13 @@ steps:
   condition: always()
 ```
 
-> Supported: `always()`, `succeeded()`, `not()`, `and()`, `or()`, `eq()`, `ne()`, `contains()`, `startsWith()`, `endsWith()`. Variable refs can use `'$(var)'`, `'${var}'` (quoted) or bare `variables['var']` / `variables.var`; unknown variables expand to empty string. A false condition skips the step. NOTE (v1): `failed()` is accepted but always false — dynamic failure tracking is planned.
+> Supported: `always()`, `succeeded()`, `failed()`, `succeededOrFailed()`, `not()`, `and()`, `or()`, `eq()`, `ne()`, `contains()`, `startsWith()`, `endsWith()`. Variable refs can use `'$(var)'`, `'${var}'` (quoted) or bare `variables['var']` / `variables.var`; unknown variables expand to empty string. The default condition is `succeeded()`: after a failure only `failed()`/`always()`/`succeededOrFailed()` steps still run, and the run exits 1 at the end (unless `continueOnError`).
+
+Try failure handling + template rendering with the bundled example (exits 1 by design):
+
+```bash
+bun main.ts --config examples/pre_blue.yml
+```
 
 ### Files
 
@@ -143,6 +172,19 @@ steps:
 ```
 
 > `target` is always a directory (created if missing). `contents` defaults to all files (`dotfiles` included); `!` negates a pattern. `clean: true` removes the target first; `overwrite: false` keeps existing files. `delete` accepts a literal path/dir or a glob relative to the working directory. Variables accept both `${var}` and `$(var)`, and `displayName`, `condition`, `continueOnError` and `parallel` work as with `bash` steps.
+
+### Templates
+
+Steps can render a file with the run variables (PRE-native scaffolding core):
+
+```yml
+steps:
+- template: ./examples/tpl/app.txt.tpl
+  target: ./output/
+  displayName: Render template
+```
+
+> `target` is the output file (created with parents if missing). If `target` is a directory (or ends with `/`), the file name comes from the source with a trailing `.tpl` stripped (`app.txt.tpl` → `app.txt`). Both `${var}` and `$(var)` in the content are substituted.
 
 ### HTTP
 
